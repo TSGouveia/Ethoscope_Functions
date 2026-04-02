@@ -5,34 +5,32 @@ import matplotlib.dates as mdates
 import os
 import glob
 
-# CONFIGURATION
-THRESHOLD_GAP_MINUTOS = 5  # Define what is considered a gap (in minutes)
+# CONFIGURAÇÃO
+THRESHOLD_GAP_MINUTOS = 5  # O que é considerado um "buraco" nos dados (minutos)
 
 
 def select_database_file():
-    """Searches for .db files in the current directory and asks the user to choose one."""
+    """Procura ficheiros .db no diretório atual e pede ao utilizador para escolher um."""
     db_files = glob.glob('*.db')
 
     if not db_files:
-        print("No .db files found in the current directory.")
+        print("❌ Nenhum ficheiro .db encontrado no diretório atual.")
         return None
 
-    print("Available database files:")
+    print("\nBases de dados disponíveis:")
     for i, file in enumerate(db_files):
-        # Using 1-based indexing for the display
         print(f"[{i + 1}] {file}")
 
     while True:
         try:
-            choice = input(f"\nEnter the number of the database you want to analyze (1-{len(db_files)}): ")
+            choice = input(f"\nEscolha o número da base de dados (1-{len(db_files)}): ")
             index = int(choice)
-            # Validating the 1-based index
             if 1 <= index <= len(db_files):
                 return db_files[index - 1]
             else:
-                print("Invalid choice. Please select a valid number from the list.")
+                print("⚠️ Escolha inválida. Tente novamente.")
         except ValueError:
-            print("Please enter a valid integer.")
+            print("⚠️ Por favor, insira um número inteiro.")
 
 
 def debug_presenca_absoluta():
@@ -40,11 +38,11 @@ def debug_presenca_absoluta():
     if not path:
         return
 
-    print(f"\nAnalyzing: {path}")
+    print(f"\n[*] A analisar: {path}")
     conn = sqlite3.connect(path)
     cursor = conn.cursor()
 
-    # 1. Fetch Start Time from METADATA
+    # 1. Obter o Start Time da tabela METADATA (Epoch)
     start_time_epoch = 0.0
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='METADATA'")
     if cursor.fetchone():
@@ -52,93 +50,103 @@ def debug_presenca_absoluta():
             df_meta = pd.read_sql_query("SELECT * FROM METADATA", conn)
             start_time_epoch = float(df_meta[df_meta['field'] == 'date_time']['value'].iloc[0])
         except Exception as e:
-            print(f"Could not extract start time from METADATA: {e}")
+            print(f"⚠️ Não foi possível extrair o tempo de início da METADATA: {e}")
     else:
-        print("Warning: METADATA table not found. Defaulting to epoch 0.")
+        print("⚠️ Tabela METADATA não encontrada. A usar epoch 0.")
 
-    # 2. Identify ROI tables
+    # 2. Identificar tabelas de ROI
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'ROI_%' AND name NOT LIKE '%MAP%'")
     tables = [t[0] for t in cursor.fetchall()]
+    # Ordenar numericamente (ROI_1, ROI_2, ROI_10...)
     tables.sort(key=lambda x: int(''.join(filter(str.isdigit, x))) if any(char.isdigit() for char in x) else 0)
 
-    # 3. Check for IMG_SNAPSHOTS (using COLLATE NOCASE to handle both lower and upper case)
+    # 3. Verificar IMG_SNAPSHOTS (case-insensitive)
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name COLLATE NOCASE = 'img_snapshots'")
     snap_row = cursor.fetchone()
     has_snapshots = snap_row is not None
     snap_table_name = snap_row[0] if has_snapshots else None
 
-    # Prepare Y-axis labels
+    # Preparar labels do eixo Y
     y_labels = tables.copy()
     if has_snapshots:
         y_labels.append("IMG_SNAPSHOTS")
 
     fig, ax = plt.subplots(figsize=(12, 8))
 
-    # Convert threshold from minutes to milliseconds
+    # Converter threshold de minutos para milissegundos
     gap_threshold_ms = THRESHOLD_GAP_MINUTOS * 60 * 1000
 
-    print("Analyzing gaps and snapshots...")
+    print("[*] A processar intervalos e snapshots...")
 
-    # Draw ROI data
+    # Desenhar dados das ROIs
     for i, table in enumerate(tables):
         df = pd.read_sql_query(f"SELECT t FROM {table} ORDER BY t", conn)
 
         if df.empty:
-            ax.text(0, i, f" {table} (EMPTY)", color='red', va='center', fontsize=9)
+            ax.text(0.01, i, f" {table} (EMPTY)", color='red', va='center', fontsize=9,
+                    transform=ax.get_yaxis_transform())
             continue
 
-        # Convert relative 't' (ms) to absolute datetime using start_time_epoch
+        # Converter 't' relativo (ms) para datetime absoluto
         df['datetime'] = pd.to_datetime(start_time_epoch + (df['t'] / 1000.0), unit='s')
 
-        # Detect jumps (gaps) using the difference in milliseconds
+        # Detetar saltos (gaps)
         diffs = df['t'].diff()
         gap_indices = diffs[diffs > gap_threshold_ms].index.tolist()
         indices = [0] + gap_indices + [len(df)]
 
-        # Draw the data segments
+        # Desenhar segmentos contínuos
         for s, e in zip(indices[:-1], indices[1:]):
             segment_dt = df['datetime'].iloc[s:e]
             if not segment_dt.empty:
                 ax.hlines(i, segment_dt.min(), segment_dt.max(), colors='blue', linewidth=5, alpha=0.7)
 
-    # Draw snapshots, if they exist
+    # Desenhar snapshots, se existirem
+    show_legend = False
     if has_snapshots:
-        snapshot_idx = len(tables)  # Place on the row above the last ROI
+        snapshot_idx = len(tables)
         df_snap = pd.read_sql_query(f"SELECT t FROM {snap_table_name} ORDER BY t", conn)
 
         if not df_snap.empty:
-            # Convert snapshot relative time to absolute time
             df_snap['datetime'] = pd.to_datetime(start_time_epoch + (df_snap['t'] / 1000.0), unit='s')
-
-            # Use scatter plot with vertical markers for discrete events
             ax.scatter(df_snap['datetime'], [snapshot_idx] * len(df_snap),
                        color='green', marker='|', s=100, label='Snapshots', alpha=0.8)
+            show_legend = True
         else:
-            ax.text(0, snapshot_idx, " IMG_SNAPSHOTS (EMPTY)", color='red', va='center', fontsize=9)
+            ax.text(0.01, snapshot_idx, " IMG_SNAPSHOTS (EMPTY)", color='red', va='center', fontsize=9,
+                    transform=ax.get_yaxis_transform())
 
+    # Formatação do Gráfico
     ax.set_yticks(range(len(y_labels)))
     ax.set_yticklabels(y_labels)
     ax.set_xlabel("Absolute Time")
     ax.set_title(
         f"Interruption and Snapshot Analysis - {os.path.basename(path)}\n(White spaces = Gaps > {THRESHOLD_GAP_MINUTOS} min)")
 
-    # Format the x-axis to show absolute date and time (including seconds for better granularity)
+    # Formatar eixo X para mostrar data e hora
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M:%S'))
-    fig.autofmt_xdate()  # Automatically rotates dates so they don't overlap
+    fig.autofmt_xdate()  # Roda as datas para não se sobreporem
 
     ax.grid(True, axis='x', linestyle='--', alpha=0.3)
 
-    # Add legend if snapshots exist
-    if has_snapshots:
+    # Adicionar legenda apenas se houver snapshots com dados
+    if show_legend:
         ax.legend(loc='upper right')
 
-    plt.tight_layout()
+    # Ajuste manual de margens para evitar erros de Tight Layout
+    plt.subplots_adjust(left=0.15, bottom=0.15, right=0.95, top=0.9)
 
     output_img = "debug_interrupcoes_absolutas.png"
-    plt.savefig(output_img, dpi=200)
+
+    try:
+        # Forçar DPI como inteiro para evitar MatplotlibDeprecationWarning
+        plt.savefig(output_img, dpi=int(200))
+        print(f"✅ Gráfico guardado em: {os.path.abspath(output_img)}")
+    except Exception as e:
+        print(f"❌ Erro ao guardar imagem: {e}")
+
     plt.show()
     conn.close()
-    print(f"Graph saved at: {os.path.abspath(output_img)}")
 
 
 if __name__ == "__main__":

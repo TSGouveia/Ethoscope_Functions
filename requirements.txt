@@ -1,2 +1,4 @@
 paramiko
 requests
+pandas
+matplotlib

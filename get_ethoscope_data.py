@@ -1,18 +1,35 @@
 import os
 import paramiko
+import sys
 
 # --- CONFIGURAÇÃO ---
 ETHO_USER = "ethoscope"
 ETHO_PASS = "ethoscope"
 
 
+def progress_bar(transferred, total):
+    """Função de callback para mostrar o progresso no terminal."""
+    percentage = (transferred / total) * 100
+    # Converter para MB para ser mais legível
+    transferred_mb = transferred / (1024 * 1024)
+    total_mb = total / (1024 * 1024)
+
+    # Desenhar uma barra simples [#####     ]
+    bar_length = 30
+    filled_length = int(bar_length * transferred // total)
+    bar = '█' * filled_length + '-' * (bar_length - filled_length)
+
+    # Imprimir na mesma linha (\r)
+    sys.stdout.write(f"\r[*] Progresso: |{bar}| {percentage:.1f}% ({transferred_mb:.2f} / {total_mb:.2f} MB)")
+    sys.stdout.flush()
+
+
 def main():
-    # 1. Inputs do utilizador
-    etho_folder_name = input("Digite o nome do Ethoscope (ex: ETHOSCOPE_101): ").strip()
+    etho_folder_name = input("Digite o nome da pasta (ex: ETHOSCOPE_101): ").strip()
     etho_ip = input("Digite o IP do Ethoscope: ").strip()
 
     if not etho_ip or not etho_folder_name:
-        print("❌ Erro: IP e Nome são obrigatórios.")
+        print("❌ Erro: Dados incompletos.")
         return
 
     client = paramiko.SSHClient()
@@ -22,22 +39,19 @@ def main():
         print(f"[*] A ligar a {etho_ip}...")
         client.connect(etho_ip, username=ETHO_USER, password=ETHO_PASS, timeout=15)
 
-        # 2. Detetar o ID Único (Hexadecimal)
+        # 1. Detetar ID
         stdin, stdout, stderr = client.exec_command("ls -1 /ethoscope_data/results/")
         ids = [f for f in stdout.read().decode().splitlines() if len(f) > 10]
-
-        if not ids:
-            print("❌ Erro: ID não encontrado em /ethoscope_data/results/")
-            return
+        if not ids: return
         etho_id = ids[0]
 
-        # 3. Listar experiências
+        # 2. Listar experiências
         target_dir = f"/ethoscope_data/results/{etho_id}/{etho_folder_name}/"
         stdin, stdout, stderr = client.exec_command(f"ls -1 {target_dir}")
         folders = stdout.read().decode().splitlines()
 
         if not folders:
-            print(f"[-] Nenhuma pasta encontrada em {target_dir}")
+            print(f"[-] Nenhuma pasta encontrada.")
             return
 
         print("\nExpedições encontradas:")
@@ -47,27 +61,27 @@ def main():
         esc = int(input("\nEscolha o número: "))
         folder = folders[esc - 1]
 
-        # 4. Preparar caminhos
         db_name = f"{folder}_{etho_id}.db"
         remote_path = f"{target_dir}{folder}/{db_name}"
-        temp_path = f"/tmp/{db_name}"  # Pasta temporária no Linux (RAM ou SD rápido)
+        temp_path = f"/tmp/{db_name}"
 
-        # --- PASSO CRÍTICO: COPIAR ANTES DE BAIXAR ---
-        print(f"[*] A criar cópia temporária no Ethoscope...")
-        # cp [origem] [destino]
+        # 3. Cópia interna no dispositivo
+        print(f"[*] A preparar cópia de segurança no Ethoscope...")
         client.exec_command(f"cp {remote_path} {temp_path}")
 
-        # 5. Download via SFTP
-        print(f"[*] A descarregar: {db_name}...")
+        # 4. Download Informativo
+        print(f"[*] A iniciar download de: {db_name}")
         sftp = client.open_sftp()
-        sftp.get(temp_path, db_name)
+
+        # O segredo está aqui: passamos a função progress_bar como callback
+        sftp.get(temp_path, db_name, callback=progress_bar)
+
         sftp.close()
+        print("\n")  # Salto de linha após a barra de progresso
 
-        # 6. Limpeza
-        print(f"[*] A remover ficheiro temporário do Ethoscope...")
+        # 5. Limpeza
         client.exec_command(f"rm {temp_path}")
-
-        print(f"\n✅ Concluído! Ficheiro guardado em: {os.path.abspath(db_name)}")
+        print(f"✅ Sucesso! Ficheiro: {os.path.abspath(db_name)}")
 
     except Exception as e:
         print(f"\n❌ Erro: {e}")
